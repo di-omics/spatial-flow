@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 150 20% 99%;
+  --foreground: 200 18% 12%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 200 18% 12%;
+
+  --muted: 150 14% 96%;
+  --muted-foreground: 205 9% 42%;
+
+  --secondary: 150 16% 95%;
+  --secondary-foreground: 200 16% 22%;
+
+  --accent: 173 52% 94%;
+  --accent-foreground: 174 82% 20%;
+
+  --primary: 174 82% 28%;
+  --primary-foreground: 0 0% 100%;
+
+  --border: 200 16% 90%;
+  --input: 200 16% 87%;
+  --ring: 174 82% 32%;
+
+  --pass: 152 58% 40%;
+  --flag: 38 92% 48%;
+  --fail: 350 74% 52%;
+  --review: 212 78% 54%;
+
+  --radius: 0.75rem;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  color: hsl(var(--foreground));
+  background:
+    radial-gradient(1200px 600px at 100% -10%, hsl(174 60% 96%), transparent 60%),
+    hsl(var(--background));
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  /* letter-spaced section eyebrow labels */
+  .eyebrow {
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: hsl(var(--muted-foreground));
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* thin, unobtrusive scrollbars for board / grid overflow areas */
+.scroll-thin::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 999px;
+}
+.scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}

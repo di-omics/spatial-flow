@@ -1,0 +1,114 @@
+// SpatialFlow demo data model.
+// SQLite via Prisma. Note: SQLite has no native enums, so status/type
+// fields are stored as strings with the allowed values documented inline.
+// Full lineage is modeled: Specimen -> Core -> CorePlacement(TMA) -> Slide -> ImageFile/QCResult.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Specimen {
+  id              String   @id
+  patientCode     String
+  indication      String
+  sourceDate      DateTime
+  ischemiaMinutes Int
+  necrosisPct     Float
+  qcStatus        String // PASS | FAIL | REVIEW
+  fitForPurpose   Boolean
+  stage           String // ACCESSIONED | CORED | ON_TMA | STAINED | IMAGED | QCD | INGESTED
+  createdAt       DateTime @default(now())
+  cores           Core[]
+}
+
+model Core {
+  id         String  @id
+  specimenId String
+  specimen   Specimen @relation(fields: [specimenId], references: [id])
+  label      String
+  diameterMm Float
+  status     String // CUT | PLACED | STAINED | IMAGED
+  placements CorePlacement[]
+  images     ImageFile[]
+  qcResults  QCResult[]
+}
+
+model TMA {
+  id         String   @id
+  name       String
+  rows       Int
+  cols       Int
+  batchId    String
+  createdAt  DateTime @default(now())
+  placements CorePlacement[]
+  slides     Slide[]
+}
+
+model CorePlacement {
+  id          String  @id @default(cuid())
+  tmaId       String
+  tma         TMA     @relation(fields: [tmaId], references: [id])
+  coreId      String?
+  core        Core?   @relation(fields: [coreId], references: [id])
+  row         Int
+  col         Int
+  isControl   Boolean @default(false)
+  controlType String? // TONSIL | LIVER | SPLEEN | PLACENTA | null
+}
+
+model Slide {
+  id         String   @id
+  tmaId      String
+  tma        TMA      @relation(fields: [tmaId], references: [id])
+  assayType  String // mIF | H_AND_E | SPATIAL_TX
+  scanStatus String // PENDING | SCANNING | SCANNED | FAILED
+  assayRunId String?
+  assayRun   AssayRun? @relation(fields: [assayRunId], references: [id])
+  images     ImageFile[]
+  qcResults  QCResult[]
+}
+
+model AssayRun {
+  id        String    @id
+  name      String
+  batchId   String
+  startDate DateTime
+  endDate   DateTime?
+  status    String // PLANNED | RUNNING | DONE
+  slides    Slide[]
+}
+
+model ImageFile {
+  id            String  @id @default(cuid())
+  slideId       String
+  slide         Slide   @relation(fields: [slideId], references: [id])
+  coreId        String?
+  core          Core?   @relation(fields: [coreId], references: [id])
+  channel       String
+  uri           String
+  qcMetricsJson String? // JSON blob of per-channel image metrics
+}
+
+model QCResult {
+  id                 String   @id @default(cuid())
+  coreId             String?
+  core               Core?    @relation(fields: [coreId], references: [id])
+  slideId            String
+  slide              Slide    @relation(fields: [slideId], references: [id])
+  focusScore         Float
+  markerCompleteness Float
+  saturationPct      Float
+  tissueLossPct      Float
+  segSanity          Float
+  verdict            String // PASS | FLAG | FAIL
+  reviewed           Boolean  @default(false)
+  overrideVerdict    String? // manual override: PASS | FAIL | null
+  note               String?
+  failureReason      String?
+  createdAt          DateTime @default(now())
+}
