@@ -7,6 +7,12 @@
  */
 import { PrismaClient } from "@prisma/client";
 import { buildLayout, optimizeLayout, type PatientCore } from "../src/lib/tma";
+import {
+  appendProvenanceEvent,
+  imageManifestSha256,
+  type ProvenanceEventRecord,
+} from "../src/lib/provenance";
+import { VISION_POLICY } from "../src/lib/vision-gate";
 
 const prisma = new PrismaClient();
 
@@ -88,47 +94,63 @@ type QCMetrics = {
   saturationPct: number;
   tissueLossPct: number;
   segSanity: number;
+  foldScore: number;
   verdict: string;
   failureReason: string | null;
 };
 
-// ~80/12/8 PASS/FLAG/FAIL, with metrics consistent with the verdict.
+// ~80/12/8 PASS/FLAG/FAIL. A non-pass result degrades the metric that
+// corresponds to its synthetic failure reason rather than making every metric
+// fail at once. This keeps the recovery-policy demo interpretable.
 function makeQC(): QCMetrics {
   const r = rand();
-  if (r < 0.8) {
-    return {
-      focusScore: round(randFloat(0.85, 0.99), 2),
-      markerCompleteness: round(randFloat(0.92, 1.0), 2),
-      saturationPct: round(randFloat(0.3, 3), 1),
-      tissueLossPct: round(randFloat(0, 5), 1),
-      segSanity: round(randFloat(0.85, 0.99), 2),
-      verdict: "PASS",
-      failureReason: null,
-    };
-  } else if (r < 0.92) {
-    return {
-      focusScore: round(randFloat(0.62, 0.85), 2),
-      markerCompleteness: round(randFloat(0.76, 0.92), 2),
-      saturationPct: round(randFloat(3, 8), 1),
-      tissueLossPct: round(randFloat(5, 15), 1),
-      segSanity: round(randFloat(0.66, 0.85), 2),
-      verdict: "FLAG",
-      failureReason: pick(FAILURE_REASONS),
-    };
-  }
-  return {
-    focusScore: round(randFloat(0.25, 0.62), 2),
-    markerCompleteness: round(randFloat(0.4, 0.76), 2),
-    saturationPct: round(randFloat(8, 24), 1),
-    tissueLossPct: round(randFloat(15, 45), 1),
-    segSanity: round(randFloat(0.3, 0.66), 2),
-    verdict: "FAIL",
-    failureReason: pick(FAILURE_REASONS),
+  const result: QCMetrics = {
+    focusScore: round(randFloat(0.85, 0.99), 2),
+    markerCompleteness: round(randFloat(0.92, 1.0), 2),
+    saturationPct: round(randFloat(0.3, 3), 1),
+    tissueLossPct: round(randFloat(0, 5), 1),
+    segSanity: round(randFloat(0.85, 0.99), 2),
+    foldScore: round(randFloat(0.01, 0.18), 2),
+    verdict: "PASS",
+    failureReason: null,
   };
+  if (r < 0.8) {
+    return result;
+  }
+
+  const severe = r >= 0.92;
+  const reason = pick(FAILURE_REASONS);
+  result.verdict = severe ? "FAIL" : "FLAG";
+  result.failureReason = reason;
+  switch (reason) {
+    case "Out of focus":
+      result.focusScore = round(randFloat(severe ? 0.3 : 0.62, severe ? 0.58 : 0.78), 2);
+      break;
+    case "Marker dropout":
+      result.markerCompleteness = round(
+        randFloat(severe ? 0.42 : 0.72, severe ? 0.68 : 0.88),
+        2
+      );
+      break;
+    case "Saturation":
+      result.saturationPct = round(randFloat(severe ? 12 : 6, severe ? 24 : 10), 1);
+      break;
+    case "Tissue loss":
+      result.tissueLossPct = round(randFloat(severe ? 24 : 11, severe ? 48 : 20), 1);
+      break;
+    case "Segmentation error":
+      result.segSanity = round(randFloat(severe ? 0.35 : 0.62, severe ? 0.58 : 0.78), 2);
+      break;
+    case "Folded tissue":
+      result.foldScore = round(randFloat(severe ? 0.62 : 0.3, severe ? 0.92 : 0.52), 2);
+      break;
+  }
+  return result;
 }
 
 async function main() {
   console.log("Clearing existing data...");
+  await prisma.provenanceEvent.deleteMany();
   await prisma.qCResult.deleteMany();
   await prisma.imageFile.deleteMany();
   await prisma.corePlacement.deleteMany();
@@ -346,6 +368,9 @@ async function main() {
     channel: string;
     uri: string;
     qcMetricsJson: string;
+    acquisitionId: string;
+    capturedAt: Date;
+    manifestSha256: string;
   }[] = [];
   const qcResults: {
     coreId: string;
@@ -355,36 +380,74 @@ async function main() {
     saturationPct: number;
     tissueLossPct: number;
     segSanity: number;
+    foldScore: number;
     verdict: string;
     reviewed: boolean;
     overrideVerdict: string | null;
     note: string | null;
     failureReason: string | null;
+    observedCoreId: string;
+    observedSlideId: string;
+    identityConfidence: number;
+    acquisitionId: string;
+    attempt: number;
+    policyVersion: string;
     createdAt: Date;
   }[] = [];
+  const provenanceEvents: ProvenanceEventRecord[] = [];
 
   for (const run of RUNS) {
     if (run.status === "PLANNED") continue;
     const slide = slides.find((s) => s.tmaId === run.tma && s.assayType === run.assay)!;
     const tmaPlacements = placementsByTma.get(run.tma) ?? [];
-    for (const p of tmaPlacements) {
+    for (const [placementIndex, p] of tmaPlacements.entries()) {
       const coreId = p.coreId!;
       const qc = makeQC();
       const channels = run.assay === "mIF" ? MIF_CHANNELS : [run.assay];
+      const acquisitionId = `ACQ-${run.id}-${coreId}`;
+      const capturedAt = new Date(
+        daysAgo(run.end ?? run.start).getTime() + placementIndex * 60_000
+      );
+      // Two explicit synthetic identity exceptions make fail-closed behavior
+      // visible in the running-run demo. They are not real classifier output.
+      const observedCoreId =
+        run.status === "RUNNING" && placementIndex === 0
+          ? tmaPlacements[1]?.coreId ?? coreId
+          : coreId;
+      const identityConfidence =
+        run.status === "RUNNING" && placementIndex === 1
+          ? 0.94
+          : round(randFloat(0.985, 0.999), 3);
+      const manifestHashes: string[] = [];
       for (const ch of channels) {
+        const uri = `synthetic://${run.tma.toLowerCase()}/${run.assay.toLowerCase()}/${coreId}/${ch}.ome.tiff`;
+        const manifestSha256 = imageManifestSha256({
+          acquisitionId,
+          channel: ch,
+          uri,
+          capturedAt,
+        });
+        manifestHashes.push(manifestSha256);
         images.push({
           slideId: slide.id,
           coreId,
           channel: ch,
-          uri: `synthetic://${run.tma.toLowerCase()}/${run.assay.toLowerCase()}/${coreId}/${ch}.ome.tiff`,
+          uri,
           qcMetricsJson: JSON.stringify({
             meanIntensity: round(randFloat(120, 900), 0),
             snr: round(randFloat(4, 40), 1),
           }),
+          acquisitionId,
+          capturedAt,
+          manifestSha256,
         });
       }
       // DONE runs are fully reviewed; RUNNING runs leave flags/fails to review.
       const reviewed = run.status === "DONE" ? true : qc.verdict === "PASS";
+      const attempt =
+        run.status === "RUNNING" && qc.verdict !== "PASS" && placementIndex % 3 === 0
+          ? 2
+          : 1;
       qcResults.push({
         coreId,
         slideId: slide.id,
@@ -393,13 +456,92 @@ async function main() {
         saturationPct: qc.saturationPct,
         tissueLossPct: qc.tissueLossPct,
         segSanity: qc.segSanity,
+        foldScore: qc.foldScore,
         verdict: qc.verdict,
         reviewed,
         overrideVerdict: null,
         note: null,
         failureReason: qc.failureReason,
+        observedCoreId,
+        observedSlideId: slide.id,
+        identityConfidence,
+        acquisitionId,
+        attempt,
+        policyVersion: VISION_POLICY.version,
         createdAt: daysAgo(run.end ?? run.start),
       });
+
+      const specimenId = coreId.slice(0, "SPC-0000".length);
+      const eventBase = {
+        specimenId,
+        coreId,
+        slideId: slide.id,
+        assayRunId: run.id,
+        occurredAt: capturedAt,
+      };
+      const definitions = [
+        {
+          eventType: "SPECIMEN_ID_BOUND",
+          actor: "accession.station.synthetic",
+          payload: { specimenId, coreId, evidenceKind: "SYNTHETIC_DEMO" },
+        },
+        {
+          eventType: "TMA_POSITION_BOUND",
+          actor: "tma.planner",
+          payload: {
+            tmaId: run.tma,
+            row: p.row,
+            col: p.col,
+            evidenceKind: "SYNTHETIC_DEMO",
+          },
+        },
+        {
+          eventType: "IMAGE_ACQUIRED",
+          actor: `scanner.${run.assay.toLowerCase()}.synthetic`,
+          payload: {
+            acquisitionId,
+            observedCoreId,
+            observedSlideId: slide.id,
+            identityConfidence,
+            manifestHashes: manifestHashes.sort(),
+            evidenceKind: "SYNTHETIC_DEMO",
+          },
+        },
+        {
+          eventType: "VISION_QC_EVALUATED",
+          actor: "vision.synthetic-metrics-v1",
+          payload: {
+            metrics: {
+              focusScore: qc.focusScore,
+              markerCompleteness: qc.markerCompleteness,
+              saturationPct: qc.saturationPct,
+              tissueLossPct: qc.tissueLossPct,
+              segSanity: qc.segSanity,
+              foldScore: qc.foldScore,
+            },
+            verdict: qc.verdict,
+            policyVersion: VISION_POLICY.version,
+            evidenceKind: "SYNTHETIC_DEMO",
+          },
+        },
+      ];
+      let previousHash: string | null = null;
+      for (const [eventIndex, definition] of definitions.entries()) {
+        const event = appendProvenanceEvent(
+          {
+            ...eventBase,
+            id: `PE-${run.id}-${coreId}-${eventIndex + 1}`,
+            sequence: eventIndex + 1,
+            eventType: definition.eventType,
+            actor: definition.actor,
+            occurredAt: new Date(capturedAt.getTime() + eventIndex * 1000),
+            payload: definition.payload,
+          },
+          previousHash
+        );
+        provenanceEvents.push(event);
+        previousHash = event.eventHash;
+      }
     }
     // Mark cores on scanned/scanning slides as imaged.
     await prisma.core.updateMany({
@@ -415,6 +557,9 @@ async function main() {
   for (let i = 0; i < qcResults.length; i += 500) {
     await prisma.qCResult.createMany({ data: qcResults.slice(i, i + 500) });
   }
+  for (let i = 0; i < provenanceEvents.length; i += 500) {
+    await prisma.provenanceEvent.createMany({ data: provenanceEvents.slice(i, i + 500) });
+  }
 
   // ---- summary -------------------------------------------------------------
   const counts = {
@@ -426,6 +571,7 @@ async function main() {
     runs: await prisma.assayRun.count(),
     images: await prisma.imageFile.count(),
     qc: await prisma.qCResult.count(),
+    provenanceEvents: await prisma.provenanceEvent.count(),
   };
   console.log("Seed complete:", counts);
 }

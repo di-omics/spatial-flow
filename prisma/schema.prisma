@@ -13,38 +13,40 @@ datasource db {
 }
 
 model Specimen {
-  id              String   @id
-  patientCode     String
-  indication      String
-  sourceDate      DateTime
-  ischemiaMinutes Int
-  necrosisPct     Float
-  qcStatus        String // PASS | FAIL | REVIEW
-  fitForPurpose   Boolean
-  stage           String // ACCESSIONED | CORED | ON_TMA | STAINED | IMAGED | QCD | INGESTED
-  createdAt       DateTime @default(now())
-  cores           Core[]
+  id               String            @id
+  patientCode      String
+  indication       String
+  sourceDate       DateTime
+  ischemiaMinutes  Int
+  necrosisPct      Float
+  qcStatus         String // PASS | FAIL | REVIEW
+  fitForPurpose    Boolean
+  stage            String // ACCESSIONED | CORED | ON_TMA | STAINED | IMAGED | QCD | INGESTED
+  createdAt        DateTime          @default(now())
+  cores            Core[]
+  provenanceEvents ProvenanceEvent[]
 }
 
 model Core {
-  id         String  @id
-  specimenId String
-  specimen   Specimen @relation(fields: [specimenId], references: [id])
-  label      String
-  diameterMm Float
-  status     String // CUT | PLACED | STAINED | IMAGED
-  placements CorePlacement[]
-  images     ImageFile[]
-  qcResults  QCResult[]
+  id               String            @id
+  specimenId       String
+  specimen         Specimen          @relation(fields: [specimenId], references: [id])
+  label            String
+  diameterMm       Float
+  status           String // CUT | PLACED | STAINED | IMAGED
+  placements       CorePlacement[]
+  images           ImageFile[]
+  qcResults        QCResult[]
+  provenanceEvents ProvenanceEvent[]
 }
 
 model TMA {
-  id         String   @id
+  id         String          @id
   name       String
   rows       Int
   cols       Int
   batchId    String
-  createdAt  DateTime @default(now())
+  createdAt  DateTime        @default(now())
   placements CorePlacement[]
   slides     Slide[]
 }
@@ -62,36 +64,41 @@ model CorePlacement {
 }
 
 model Slide {
-  id         String   @id
-  tmaId      String
-  tma        TMA      @relation(fields: [tmaId], references: [id])
-  assayType  String // mIF | H_AND_E | SPATIAL_TX
-  scanStatus String // PENDING | SCANNING | SCANNED | FAILED
-  assayRunId String?
-  assayRun   AssayRun? @relation(fields: [assayRunId], references: [id])
-  images     ImageFile[]
-  qcResults  QCResult[]
+  id               String            @id
+  tmaId            String
+  tma              TMA               @relation(fields: [tmaId], references: [id])
+  assayType        String // mIF | H_AND_E | SPATIAL_TX
+  scanStatus       String // PENDING | SCANNING | SCANNED | FAILED
+  assayRunId       String?
+  assayRun         AssayRun?         @relation(fields: [assayRunId], references: [id])
+  images           ImageFile[]
+  qcResults        QCResult[]
+  provenanceEvents ProvenanceEvent[]
 }
 
 model AssayRun {
-  id        String    @id
-  name      String
-  batchId   String
-  startDate DateTime
-  endDate   DateTime?
-  status    String // PLANNED | RUNNING | DONE
-  slides    Slide[]
+  id               String            @id
+  name             String
+  batchId          String
+  startDate        DateTime
+  endDate          DateTime?
+  status           String // PLANNED | RUNNING | DONE
+  slides           Slide[]
+  provenanceEvents ProvenanceEvent[]
 }
 
 model ImageFile {
-  id            String  @id @default(cuid())
-  slideId       String
-  slide         Slide   @relation(fields: [slideId], references: [id])
-  coreId        String?
-  core          Core?   @relation(fields: [coreId], references: [id])
-  channel       String
-  uri           String
-  qcMetricsJson String? // JSON blob of per-channel image metrics
+  id             String    @id @default(cuid())
+  slideId        String
+  slide          Slide     @relation(fields: [slideId], references: [id])
+  coreId         String?
+  core           Core?     @relation(fields: [coreId], references: [id])
+  channel        String
+  uri            String
+  qcMetricsJson  String? // JSON blob of per-channel image metrics
+  acquisitionId  String?
+  capturedAt     DateTime?
+  manifestSha256 String? // SHA-256 of the synthetic image manifest, not image bytes
 }
 
 model QCResult {
@@ -105,10 +112,41 @@ model QCResult {
   saturationPct      Float
   tissueLossPct      Float
   segSanity          Float
+  foldScore          Float    @default(0) // synthetic probability of folded tissue
   verdict            String // PASS | FLAG | FAIL
   reviewed           Boolean  @default(false)
   overrideVerdict    String? // manual override: PASS | FAIL | null
   note               String?
   failureReason      String?
+  observedCoreId     String?
+  observedSlideId    String?
+  identityConfidence Float?
+  acquisitionId      String?
+  attempt            Int      @default(1)
+  policyVersion      String   @default("spatial-qc-v1")
   createdAt          DateTime @default(now())
+}
+
+// Append-only, hash-chained evidence for one synthetic acquisition. Event hashes
+// are recomputed before a QC result can pass the release gate.
+model ProvenanceEvent {
+  id           String   @id
+  specimenId   String
+  specimen     Specimen @relation(fields: [specimenId], references: [id])
+  coreId       String
+  core         Core     @relation(fields: [coreId], references: [id])
+  slideId      String
+  slide        Slide    @relation(fields: [slideId], references: [id])
+  assayRunId   String
+  assayRun     AssayRun @relation(fields: [assayRunId], references: [id])
+  sequence     Int
+  eventType    String
+  actor        String
+  occurredAt   DateTime
+  payloadJson  String
+  previousHash String?
+  eventHash    String   @unique
+
+  @@unique([assayRunId, slideId, coreId, sequence])
+  @@index([coreId, slideId])
 }

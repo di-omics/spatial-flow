@@ -3,7 +3,17 @@
 import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { CheckCircle2, AlertTriangle, XCircle, Check, Loader2 } from "lucide-react";
+import {
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Check,
+  Loader2,
+  Fingerprint,
+  Link2,
+  RotateCcw,
+  ShieldCheck,
+} from "lucide-react";
 import { CoreThumbnail } from "@/components/qc/thumbnail";
 import { FailureReasonsChart } from "@/components/charts/charts";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -13,6 +23,7 @@ import { Drawer } from "@/components/ui/drawer";
 import { ASSAY_LABELS, MIF_CHANNELS, INDICATION_COLORS, type Indication } from "@/lib/constants";
 import { cn, formatDate } from "@/lib/utils";
 import { approveRun, overrideCore } from "@/app/imaging-qc/actions";
+import { VISION_POLICY } from "@/lib/vision-gate";
 
 type CoreQC = {
   qcId: string;
@@ -26,12 +37,45 @@ type CoreQC = {
   saturationPct: number;
   tissueLossPct: number;
   segSanity: number;
+  foldScore: number;
   verdict: string;
   overrideVerdict: string | null;
   effectiveVerdict: string;
   reviewed: boolean;
   failureReason: string | null;
   note: string | null;
+  identity: {
+    status: "MATCH" | "MISMATCH" | "LOW_CONFIDENCE" | "MISSING";
+    expectedCoreId: string;
+    observedCoreId: string | null;
+    expectedSlideId: string;
+    observedSlideId: string | null;
+    confidence: number | null;
+  };
+  provenance: {
+    valid: boolean;
+    chainValid: boolean;
+    manifestsValid: boolean;
+    eventCount: number;
+    head: string | null;
+    errors: string[];
+    acquisitionId: string | null;
+    capturedAt: string | null;
+  };
+  gate: {
+    state: "RELEASE" | "RETRY" | "HOLD";
+    reasons: string[];
+    reasonLabels: string[];
+    policyVersion: string;
+    recovery: {
+      action: string;
+      automatic: boolean;
+      requiresExpert: boolean;
+      attempt: number;
+      maxAttempts: number;
+      instruction: string;
+    };
+  };
 };
 
 type Detail = {
@@ -46,7 +90,14 @@ type Detail = {
     endDate: string | null;
   };
   cores: CoreQC[];
-  summary: { PASS: number; FLAG: number; FAIL: number; needsReview: number };
+  summary: {
+    PASS: number;
+    FLAG: number;
+    FAIL: number;
+    needsReview: number;
+    gates: { RELEASE: number; RETRY: number; HOLD: number };
+    releaseBlocked: number;
+  };
   failureReasons: { reason: string; count: number }[];
 };
 
@@ -78,6 +129,7 @@ export function QcDashboard({
   const [channels, setChannels] = useState<string[]>(MIF_CHANNELS.map((c) => c.key));
   const [onlyReview, setOnlyReview] = useState(false);
   const [activeQc, setActiveQc] = useState<string | null>(null);
+  const [releaseMessage, setReleaseMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   const isMif = detail?.run.assayType === "mIF";
@@ -85,7 +137,9 @@ export function QcDashboard({
   const filtered = useMemo(() => {
     if (!detail) return [];
     return onlyReview
-      ? detail.cores.filter((c) => !c.reviewed && c.effectiveVerdict !== "PASS")
+      ? detail.cores.filter(
+          (c) => c.gate.state !== "RELEASE" || (!c.reviewed && c.effectiveVerdict !== "PASS")
+        )
       : detail.cores;
   }, [detail, onlyReview]);
 
@@ -100,8 +154,9 @@ export function QcDashboard({
   function handleApprove() {
     if (!detail) return;
     startTransition(async () => {
-      await approveRun(detail.run.id);
-      router.refresh();
+      const result = await approveRun(detail.run.id);
+      setReleaseMessage(result.message);
+      if (result.ok) router.refresh();
     });
   }
 
@@ -164,9 +219,17 @@ export function QcDashboard({
                       {formatDate(detail.run.startDate)}
                     </div>
                   </div>
-                  <Button onClick={handleApprove} disabled={pending}>
+                  <Button
+                    onClick={handleApprove}
+                    disabled={pending || detail.summary.releaseBlocked > 0}
+                    title={
+                      detail.summary.releaseBlocked > 0
+                        ? "Resolve every retry and hold before releasing this run"
+                        : "Release under the active vision policy"
+                    }
+                  >
                     {pending ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
-                    Approve batch
+                    {detail.summary.releaseBlocked > 0 ? "Release blocked" : "Release run"}
                   </Button>
                 </div>
 
@@ -176,8 +239,13 @@ export function QcDashboard({
                   <SummaryTile icon={<XCircle className="size-4" />} label="Fail" value={detail.summary.FAIL} tone="fail" />
                   <SummaryTile label="Needs review" value={detail.summary.needsReview} tone="review" />
                 </div>
+                {releaseMessage && (
+                  <p className="mt-3 text-xs text-muted-foreground">{releaseMessage}</p>
+                )}
               </CardContent>
             </Card>
+
+            <GateSummary detail={detail} />
 
             {/* Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -254,6 +322,16 @@ export function QcDashboard({
                           {!c.reviewed && c.effectiveVerdict !== "PASS" && (
                             <span className="absolute right-1 top-1 size-2 rounded-full bg-white shadow ring-1 ring-black/10" />
                           )}
+                          {c.gate.state !== "RELEASE" && (
+                            <span
+                              className={cn(
+                                "absolute bottom-1 left-1 rounded px-1 py-0.5 text-[8px] font-bold text-white shadow",
+                                c.gate.state === "HOLD" ? "bg-fail" : "bg-review"
+                              )}
+                            >
+                              {c.gate.state}
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1 truncate text-[10px] text-muted-foreground">
                           {c.specimenId}
@@ -305,6 +383,64 @@ export function QcDashboard({
   );
 }
 
+function GateSummary({ detail }: { detail: Detail }) {
+  const tiles = [
+    {
+      state: "RELEASE" as const,
+      label: "Release-ready",
+      value: detail.summary.gates.RELEASE,
+      icon: <ShieldCheck className="size-4" />,
+      className: "text-pass",
+    },
+    {
+      state: "RETRY" as const,
+      label: "Bounded retry",
+      value: detail.summary.gates.RETRY,
+      icon: <RotateCcw className="size-4" />,
+      className: "text-review",
+    },
+    {
+      state: "HOLD" as const,
+      label: "Expert hold",
+      value: detail.summary.gates.HOLD,
+      icon: <AlertTriangle className="size-4" />,
+      className: "text-fail",
+    },
+  ];
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <CardTitle>Autonomous release gate</CardTitle>
+            <CardDescription>
+              Versioned policy combines sample identity, hash-chained provenance, and vision metrics.
+            </CardDescription>
+          </div>
+          <Badge variant="outline">spatial-qc-v1</Badge>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-3 sm:grid-cols-3">
+          {tiles.map((tile) => (
+            <div key={tile.state} className="rounded-lg border border-border p-3">
+              <div className={cn("flex items-center gap-1.5 text-xs font-medium", tile.className)}>
+                {tile.icon}
+                {tile.label}
+              </div>
+              <div className="mt-1 text-2xl font-semibold tabular">{tile.value}</div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-xs text-muted-foreground">
+          Identity and provenance failures always fail closed. Only metric exceptions can be
+          accepted by a domain expert, and a written rationale is required.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SummaryTile({
   icon,
   label,
@@ -343,21 +479,24 @@ function CoreDetail({
   onSaved: () => void;
 }) {
   const [note, setNote] = useState(core.note ?? "");
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   function save(verdict: "PASS" | "FAIL") {
     startTransition(async () => {
-      await overrideCore(core.qcId, verdict, note);
-      onSaved();
+      const result = await overrideCore(core.qcId, verdict, note);
+      setSaveMessage(result.message);
+      if (result.ok) onSaved();
     });
   }
 
   const metrics = [
-    { label: "Focus score", value: core.focusScore, kind: "unit" as const, good: core.focusScore >= 0.8 },
-    { label: "Marker completeness", value: core.markerCompleteness, kind: "unit" as const, good: core.markerCompleteness >= 0.9 },
-    { label: "Segmentation sanity", value: core.segSanity, kind: "unit" as const, good: core.segSanity >= 0.8 },
-    { label: "Saturation", value: core.saturationPct, kind: "pct" as const, good: core.saturationPct < 5 },
-    { label: "Tissue loss", value: core.tissueLossPct, kind: "pct" as const, good: core.tissueLossPct < 10 },
+    { label: "Focus score", value: core.focusScore, kind: "unit" as const, good: core.focusScore >= VISION_POLICY.thresholds.focusScoreMin },
+    { label: "Marker completeness", value: core.markerCompleteness, kind: "unit" as const, good: core.markerCompleteness >= VISION_POLICY.thresholds.markerCompletenessMin },
+    { label: "Segmentation sanity", value: core.segSanity, kind: "unit" as const, good: core.segSanity >= VISION_POLICY.thresholds.segSanityMin },
+    { label: "Saturation", value: core.saturationPct, kind: "pct" as const, good: core.saturationPct <= VISION_POLICY.thresholds.saturationPctMax },
+    { label: "Tissue loss", value: core.tissueLossPct, kind: "pct" as const, good: core.tissueLossPct <= VISION_POLICY.thresholds.tissueLossPctMax },
+    { label: "Fold probability", value: core.foldScore, kind: "unit" as const, good: core.foldScore <= VISION_POLICY.thresholds.foldScoreMax },
   ];
 
   return (
@@ -379,6 +518,75 @@ function CoreDetail({
         )}
       </div>
 
+      <div className="rounded-lg border border-border p-3">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 text-sm font-semibold">
+            <ShieldCheck className="size-4" /> Release policy
+          </div>
+          <StatusBadge status={core.gate.state} />
+        </div>
+        {core.gate.reasonLabels.length > 0 && (
+          <ul className="mb-3 space-y-1 text-xs text-muted-foreground">
+            {core.gate.reasonLabels.map((reason) => (
+              <li key={reason}>- {reason}</li>
+            ))}
+          </ul>
+        )}
+        <div className="rounded-md bg-muted/50 p-2.5 text-xs">
+          <div className="flex items-center justify-between gap-3 font-medium">
+            <span>Recovery: {core.gate.recovery.action.replaceAll("_", " ")}</span>
+            <span className="text-muted-foreground">
+              attempt {core.gate.recovery.attempt}/{core.gate.recovery.maxAttempts}
+            </span>
+          </div>
+          <p className="mt-1 text-muted-foreground">{core.gate.recovery.instruction}</p>
+          <div className="mt-2">
+            <Badge variant="outline">
+              {core.gate.recovery.requiresExpert
+                ? "expert authorization required"
+                : core.gate.recovery.automatic
+                  ? "bounded automatic action"
+                  : "no automatic action"}
+            </Badge>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-sm font-semibold">
+              <Fingerprint className="size-4" /> Identity
+            </span>
+            <StatusBadge status={core.identity.status} />
+          </div>
+          <div className="space-y-1 text-xs text-muted-foreground">
+            <div>Expected: <span className="font-mono text-foreground">{core.identity.expectedCoreId}</span></div>
+            <div>Observed: <span className="font-mono text-foreground">{core.identity.observedCoreId ?? "none"}</span></div>
+            <div>Confidence: <span className="text-foreground">{core.identity.confidence === null ? "none" : `${(core.identity.confidence * 100).toFixed(1)}%`}</span></div>
+          </div>
+        </div>
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-sm font-semibold">
+              <Link2 className="size-4" /> Provenance
+            </span>
+            <Badge variant={core.provenance.valid ? "pass" : "fail"}>
+              {core.provenance.valid ? "Verified" : "Invalid"}
+            </Badge>
+          </div>
+          <div className="space-y-1 text-xs text-muted-foreground">
+            <div>{core.provenance.eventCount} hash-chained events</div>
+            <div className="truncate font-mono" title={core.provenance.head ?? ""}>
+              head {core.provenance.head?.slice(0, 12) ?? "none"}
+            </div>
+            <div className="truncate" title={core.provenance.acquisitionId ?? ""}>
+              {core.provenance.acquisitionId ?? "no acquisition id"}
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="space-y-2.5">
         {metrics.map((m) => (
           <MetricBar key={m.label} {...m} />
@@ -386,24 +594,33 @@ function CoreDetail({
       </div>
 
       <div className="space-y-2 border-t border-border pt-4">
-        <div className="text-sm font-medium">Manual override</div>
+        <div className="text-sm font-medium">Domain-expert disposition</div>
         <textarea
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Add a review note (optional)..."
+          placeholder="Scientific rationale (required to accept an exception)..."
           rows={2}
           className="w-full rounded-md border border-input bg-card px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         />
         <div className="flex gap-2">
-          <Button variant="outline" className="flex-1" onClick={() => save("PASS")} disabled={pending}>
+          <Button
+            variant="outline"
+            className="flex-1"
+            onClick={() => save("PASS")}
+            disabled={pending || note.trim().length < 8}
+          >
             <CheckCircle2 className="size-4 text-pass" />
-            Mark pass
+            Accept exception
           </Button>
           <Button variant="outline" className="flex-1" onClick={() => save("FAIL")} disabled={pending}>
             <XCircle className="size-4 text-fail" />
-            Mark fail
+            Keep on hold
           </Button>
         </div>
+        {saveMessage && <p className="text-xs text-muted-foreground">{saveMessage}</p>}
+        <p className="text-xs text-muted-foreground">
+          Expert overrides can accept metric exceptions. They cannot bypass identity or provenance failures.
+        </p>
       </div>
 
       <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">

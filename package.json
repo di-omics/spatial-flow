@@ -7,7 +7,9 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
-    "seed": "prisma db push --skip-generate && tsx prisma/seed.ts",
+    "test": "node --import tsx --test src/lib/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "seed": "node scripts/ensure-sqlite.mjs && prisma db push --skip-generate && node --import tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "postinstall": "prisma generate"
   },

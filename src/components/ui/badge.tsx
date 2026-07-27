@@ -41,6 +41,13 @@ export function StatusBadge({ status }: { status: string }) {
     SCANNED: { variant: "pass", label: "Scanned" },
     SCANNING: { variant: "review", label: "Scanning" },
     PENDING: { variant: "outline", label: "Pending" },
+    RELEASE: { variant: "pass", label: "Release" },
+    RETRY: { variant: "review", label: "Retry" },
+    HOLD: { variant: "fail", label: "Hold" },
+    MATCH: { variant: "pass", label: "Match" },
+    MISMATCH: { variant: "fail", label: "Mismatch" },
+    LOW_CONFIDENCE: { variant: "review", label: "Low confidence" },
+    MISSING: { variant: "outline", label: "Missing" },
   };
   const cfg = map[status] ?? { variant: "default" as const, label: status };
   return <Badge variant={cfg.variant}>{cfg.label}</Badge>;

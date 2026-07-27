@@ -20,7 +20,7 @@ export default async function ImagingQcPage({
       <PageHeader
         eyebrow="Module 3"
         title="Imaging QC"
-        description="Auto-score every core across multiplex IF, H&E and spatial transcriptomics, triage what needs review, and approve batches."
+        description="Bind every synthetic image to its sample, verify provenance, apply versioned vision QC, and route bounded recovery before release."
         right={<DemoBadge />}
       />
       <QcDashboard runs={runs} selectedId={selectedId} detail={detail} />
