@@ -11,7 +11,7 @@ data: no real backend lab, no real specimens, no real images.
 A lab that profiles tumor tissue has to coordinate a long pipeline - accession and
 QC each specimen, cut it into cores, arrange ~130 cores onto a tissue microarray
 (TMA) with every patient deliberately spread across slides to minimize batch
-effects, run three imaging assays on adjacent sections (multiplex immunofluorescence,
+effects, run 3 imaging assays on adjacent sections (multiplex immunofluorescence,
 H&E, and imaging-based spatial transcriptomics), QC the images, and ingest
 everything for ML. Today that coordination usually lives in spreadsheets.
 SpatialFlow shows what it looks like when the software layer around that pipeline is
@@ -30,7 +30,7 @@ npm run dev     # http://localhost:3000
 
 Zero external infrastructure - the data store is a local SQLite file.
 
-## The three modules
+## The 3 modules
 
 1. **Command Center** - KPIs (patients profiled, QC pass rate, active batches,
    weekly throughput), a pipeline board, throughput/indication charts, and a
